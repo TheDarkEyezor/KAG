@@ -105,23 +105,18 @@ class OllamaClient(LLMClient):
             tools=tools,
         )
         if not self.stream:
-            # reasoning_content = getattr(
-            #     response.choices[0].message, "reasoning_content", None
-            # )
-            # content = response.choices[0].message.content
-            # if reasoning_content:
-            #     rsp = f"{reasoning_content}\n{content}"
-            # else:
-            #     rsp = content
-            rsp = response.message.content
-            tool_calls = response.message.tool_calls
+            # Access response parts as dictionary keys
+            rsp = response['message']['content']
+            tool_calls = response['message'].get('tool_calls') # Use .get for optional keys
         else:
             rsp = ""
             tool_calls = None  # TODO: Handle tool calls in stream mode
 
             for chunk in response:
-                if chunk.message.content is not None:
-                    rsp += chunk.message.content
+                # Access chunk parts as dictionary keys
+                chunk_content = chunk['message'].get('content')
+                if chunk_content is not None:
+                    rsp += chunk_content
                     if reporter:
                         reporter.add_report_line(
                             segment_name,
@@ -136,8 +131,9 @@ class OllamaClient(LLMClient):
                 rsp,
                 status="FINISH",
             )
+        # Return the message dictionary if tools were used and calls were made
         if tools and tool_calls:
-            return response.message
+            return response['message']
         return rsp
 
     async def acall(self, prompt: str = "", image_url: str = None, **kwargs):
@@ -181,23 +177,18 @@ class OllamaClient(LLMClient):
             tools=tools,
         )
         if not self.stream:
-            # reasoning_content = getattr(
-            #     response.choices[0].message, "reasoning_content", None
-            # )
-            # content = response.choices[0].message.content
-            # if reasoning_content:
-            #     rsp = f"{reasoning_content}\n{content}"
-            # else:
-            #     rsp = content
-            rsp = response.message.content
-            tool_calls = response.message.tool_calls
+            # Access response parts as dictionary keys
+            rsp = response['message']['content']
+            tool_calls = response['message'].get('tool_calls') # Use .get for optional keys
         else:
             rsp = ""
             tool_calls = None  # TODO: Handle tool calls in stream mode
 
             async for chunk in response:
-                if chunk.message.content is not None:
-                    rsp += chunk.message.content
+                 # Access chunk parts as dictionary keys
+                chunk_content = chunk['message'].get('content')
+                if chunk_content is not None:
+                    rsp += chunk_content
                     if reporter:
                         reporter.add_report_line(
                             segment_name,
@@ -212,6 +203,7 @@ class OllamaClient(LLMClient):
                 rsp,
                 status="FINISH",
             )
+        # Return the message dictionary if tools were used and calls were made
         if tools and tool_calls:
-            return response.message
+            return response['message']
         return rsp
