@@ -147,11 +147,14 @@ class SPGSchemaMarkLang:
     namespace = None
     types = {}
     defined_types = {}
+    current_line = ""  # Store the current line being processed
+    defined_ids = set() # Store defined IDs for uniqueness check
 
     def __init__(self, filename, with_server=True):
         self.reset()
         self.schema_file = filename
         self.current_line_num = 0
+        self.current_line = ""
         if with_server:
             self.schema = SchemaClient()
             thing = self.schema.query_spg_type("Thing")
@@ -197,6 +200,8 @@ class SPGSchemaMarkLang:
         self.last_indent_level = 0
         self.namespace = None
         self.types = {}
+        self.current_line = ""
+        self.defined_ids = set() # Reset the set of defined IDs
 
     def save_register(self, element: RegisterUnit, value):
         """
@@ -249,8 +254,41 @@ class SPGSchemaMarkLang:
 
             self.current_parsing_level += 1
 
-    def error_msg(self, msg):
-        return f"Line# {self.current_line_num}: {msg} (Please refer https://spg.openkg.cn/tutorial/schema/dsl for details)"
+    def error_msg(self, msg, highlight_term=None):
+        """
+        Generate descriptive error messages with line content and position
+        
+        Args:
+            msg: The error message
+            highlight_term: Optional term to highlight in the line
+            
+        Returns:
+            Formatted error message string
+        """
+        line_display = self.current_line.replace('\t', '  ')  # Replace tabs for consistent display
+        position_marker = ""
+        error_position = ""
+        
+        if highlight_term and highlight_term in line_display:
+            # Find position of the problematic term and create a marker pointing to it
+            term_pos = line_display.find(highlight_term)
+            position_marker = " " * term_pos + "^" * len(highlight_term)
+            error_position = f", position {term_pos+1}-{term_pos+len(highlight_term)}"
+        
+        # Display the error with line content and marker
+        error_prefix = f"Line {self.current_line_num}{error_position}: "
+        full_msg = f"{error_prefix}{msg}\n"
+        full_msg += f"  │ {line_display}\n"
+        
+        if position_marker:
+            full_msg += f"  │ {position_marker}\n"
+        
+        full_msg += "(Please refer to https://spg.openkg.cn/tutorial/schema/dsl for details)"
+        
+        # Print the error immediately for better visibility
+        print(f"\n❌ SCHEMA ERROR:\n{full_msg}\n")
+        
+        return f"{error_prefix}{msg} (Please refer https://spg.openkg.cn/tutorial/schema/dsl for details)"
 
     def get_type_name_with_ns(self, type_name: str):
         if "." in type_name:
@@ -266,32 +304,51 @@ class SPGSchemaMarkLang:
         namespace_match = re.match(r"^namespace\s+([a-zA-Z0-9]+)$", expression)
         if namespace_match:
             assert self.namespace is None, self.error_msg(
-                "Duplicated namespace define, please ensure define it only once"
+                "Duplicated namespace define, please ensure define it only once",
+                "namespace"
             )
 
             self.namespace = namespace_match.group(1)
             return
 
+        # Updated regex to better capture content within parentheses, including empty case
         type_match = re.match(
-            r"^([a-zA-Z0-9\.]+)\((\w+)\):\s*?([a-zA-Z0-9,]+)$", expression
+            r"^([a-zA-Z0-9\.]+)\((.*?)\):\s*?([a-zA-Z0-9,]+)$", expression
         )
         if type_match:
             assert self.namespace is not None, self.error_msg(
-                "Missing namespace, please define namespace at the first"
+                "Missing namespace, please define namespace at the first",
+                "namespace"
             )
 
             type_name = type_match.group(1)
-            type_name_zh = type_match.group(2).strip()
+            type_name_zh = type_match.group(2).strip() # Capture and strip the ID
             type_class = type_match.group(3).strip()
+
+            # Check if the ID is missing
+            assert type_name_zh, self.error_msg(
+                f"Missing identifier within parentheses for type '{type_name}'",
+                f"{type_name}()"
+            )
+            # Check if the ID is unique
+            assert type_name_zh not in self.defined_ids, self.error_msg(
+                f"Identifier '{type_name_zh}' is not unique. It was already defined.",
+                type_name_zh
+            )
+            self.defined_ids.add(type_name_zh) # Add the ID to the set of defined IDs
+
+
             assert type_class in self.keyword_type, self.error_msg(
-                f"{type_class} is illegal, please define it before current line"
+                f"{type_class} is illegal, please define it before current line",
+                type_class
             )
             assert (
                 type_name.startswith("STD.")
                 or "." not in type_name
                 or type_name.startswith(f"{self.namespace}.")
             ), self.error_msg(
-                f"The name space of {type_name} does not belong to current project."
+                f"The name space of {type_name} does not belong to current project.",
+                type_name
             )
 
             spg_type = None
@@ -313,7 +370,8 @@ class SPGSchemaMarkLang:
                 spg_type = StandardType(name=f"{type_name}", name_zh=type_name_zh)
                 spg_type.spreadable = False
                 assert type_name.startswith("STD."), self.error_msg(
-                    "The name of standard type must start with STD."
+                    "The name of standard type must start with STD.",
+                    type_name
                 )
             elif type_class == "BasicType" and type_name == "Text":
                 spg_type = BasicType.Text
@@ -323,24 +381,40 @@ class SPGSchemaMarkLang:
                 spg_type = BasicType.Float
             ns_type_name = self.get_type_name_with_ns(type_name)
             assert ns_type_name not in self.types, self.error_msg(
-                f'Type "{type_name}" is duplicated in the schema'
+                f'Type "{type_name}" is duplicated in the schema',
+                type_name
             )
 
             self.types[ns_type_name] = spg_type
             self.save_register(RegisterUnit.Type, spg_type)
             return
 
+        # Updated regex for subtypes
         sub_type_match = re.match(
-            r"^([a-zA-Z0-9]+)\((\w+)\)\s*?->\s*?([a-zA-Z0-9\.]+):$", expression
+            r"^([a-zA-Z0-9]+)\((.*?)\)\s*?->\s*?([a-zA-Z0-9\.]+):$", expression
         )
         if sub_type_match:
             assert self.namespace is not None, self.error_msg(
-                "Missing namespace, please define namespace at the first"
+                "Missing namespace, please define namespace at the first",
+                "namespace"
             )
 
             type_name = sub_type_match.group(1)
-            type_name_zh = sub_type_match.group(2).strip()
+            type_name_zh = sub_type_match.group(2).strip() # Capture and strip the ID
             type_class = sub_type_match.group(3).strip()
+
+            # Check if the ID is missing
+            assert type_name_zh, self.error_msg(
+                f"Missing identifier within parentheses for subtype '{type_name}'",
+                f"{type_name}()"
+            )
+            # Check if the ID is unique
+            assert type_name_zh not in self.defined_ids, self.error_msg(
+                f"Identifier '{type_name_zh}' is not unique. It was already defined.",
+                type_name_zh
+            )
+            self.defined_ids.add(type_name_zh) # Add the ID to the set of defined IDs
+
             if "." not in type_class:
                 ns_type_class = self.get_type_name_with_ns(type_class)
             else:
@@ -348,9 +422,10 @@ class SPGSchemaMarkLang:
             assert (
                 type_class not in self.keyword_type
                 and type_class not in self.internal_type
-            ), self.error_msg(f"{type_class} is not a valid inheritable type")
+            ), self.error_msg(f"{type_class} is not a valid inheritable type", type_class)
             assert ns_type_class in self.types, self.error_msg(
-                f"{type_class} not found, please define it first"
+                f"{type_class} not found, please define it first",
+                type_class
             )
 
             parent_spg_type = self.types[ns_type_class]
@@ -358,7 +433,8 @@ class SPGSchemaMarkLang:
                 SpgTypeEnum.Entity,
                 SpgTypeEnum.Event,
             ], self.error_msg(
-                f'"{type_class}" cannot be inherited, only entity/event type can be inherited.'
+                f'"{type_class}" cannot be inherited, only entity/event type can be inherited.',
+                type_class
             )
 
             spg_type = EntityType(
@@ -378,7 +454,8 @@ class SPGSchemaMarkLang:
 
         raise Exception(
             self.error_msg(
-                "unrecognized expression, expect namespace A or A(B):C or A(B)->C"
+                "unrecognized expression, expect namespace A or A(B):C or A(B)->C",
+                expression
             )
         )
 
@@ -392,7 +469,8 @@ class SPGSchemaMarkLang:
             expression,
         )
         assert match, self.error_msg(
-            "Unrecognized expression, expect desc:|properties:|relations:"
+            "Unrecognized expression, expect desc:|properties:|relations:|hypernymPredicate:|regular:|spreadable:|autoRelate:",
+            expression.split(':')[0] if ':' in expression else expression
         )
 
         type_meta = match.group(1)
@@ -406,7 +484,8 @@ class SPGSchemaMarkLang:
                 SpgTypeEnum.Standard,
                 SpgTypeEnum.Concept,
             ], self.error_msg(
-                "Standard/concept type does not allow defining properties."
+                "Standard/concept type does not allow defining properties.",
+                "properties"
             )
             self.save_register(
                 RegisterUnit.Property, Property(name="_", object_type_name="Thing")
@@ -415,19 +494,20 @@ class SPGSchemaMarkLang:
         elif type_meta == "relations":
             assert self.parsing_register[RegisterUnit.Type].spg_type_enum not in [
                 SpgTypeEnum.Standard
-            ], self.error_msg("Standard type does not allow defining relations.")
+            ], self.error_msg("Standard type does not allow defining relations.", "relations")
             self.save_register(
                 RegisterUnit.Relation, Relation(name="_", object_type_name="Thing")
             )
 
         elif type_meta == "hypernymPredicate":
             assert meta_value in ["isA", "locateAt", "mannerOf"], self.error_msg(
-                "Invalid hypernym predicate, expect isA or locateAt or mannerOf"
+                "Invalid hypernym predicate, expect isA or locateAt or mannerOf",
+                meta_value
             )
             assert (
                 self.parsing_register[RegisterUnit.Type].spg_type_enum
                 == SpgTypeEnum.Concept
-            ), self.error_msg("Hypernym predicate is available for concept type only")
+            ), self.error_msg("Hypernym predicate is available for concept type only", "hypernymPredicate")
 
             if meta_value == "isA":
                 self.parsing_register[
@@ -446,7 +526,7 @@ class SPGSchemaMarkLang:
             assert (
                 self.parsing_register[RegisterUnit.Type].spg_type_enum
                 == SpgTypeEnum.Standard
-            ), self.error_msg("Regular is available for standard type only")
+            ), self.error_msg("Regular is available for standard type only", "regular")
             self.parsing_register[RegisterUnit.Type].constraint = {
                 "REGULAR": meta_value
             }
@@ -455,9 +535,10 @@ class SPGSchemaMarkLang:
             assert (
                 self.parsing_register[RegisterUnit.Type].spg_type_enum
                 == SpgTypeEnum.Standard
-            ), self.error_msg("Spreadable is available for standard type only")
+            ), self.error_msg("Spreadable is available for standard type only", "spreadable")
             assert meta_value == "True" or meta_value == "False", self.error_msg(
-                "Spreadable only accept True or False as its value"
+                "Spreadable only accept True or False as its value",
+                meta_value
             )
             self.parsing_register[RegisterUnit.Type].spreadable = meta_value == "True"
 
@@ -466,7 +547,8 @@ class SPGSchemaMarkLang:
                 self.parsing_register[RegisterUnit.Type].spg_type_enum
                 == SpgTypeEnum.Concept
             ), self.error_msg(
-                "AutoRelate definition is available for concept type only"
+                "AutoRelate definition is available for concept type only",
+                "autoRelate"
             )
             concept_types = meta_value.split(",")
             for concept in concept_types:
@@ -476,7 +558,8 @@ class SPGSchemaMarkLang:
                     and self.types[c].spg_type_enum == SpgTypeEnum.Concept
                 ), self.error_msg(
                     f"{concept.strip()} is not a concept type, "
-                    f"concept type only allow relationships defined between concept types"
+                    f"concept type only allow relationships defined between concept types",
+                    concept.strip()
                 )
                 for k in self.semantic_rel:
                     if k == "IND":
@@ -497,10 +580,12 @@ class SPGSchemaMarkLang:
         short_name = name_arr[0]
         pred_name = name_arr[1]
         assert short_name in self.semantic_rel, self.error_msg(
-            f"{short_name} is incorrect, expect SYNANT/CAU/SEQ/IND/INC"
+            f"{short_name} is incorrect, expect SYNANT/CAU/SEQ/IND/INC",
+            short_name
         )
         assert pred_name in self.semantic_rel[short_name], self.error_msg(
-            f'{pred_name} is incorrect, expect {" / ".join(self.semantic_rel[short_name])}'
+            f'{pred_name} is incorrect, expect {" / ".join(self.semantic_rel[short_name])}',
+            pred_name
         )
 
         subject_type = self.parsing_register[RegisterUnit.Type]
@@ -510,65 +595,77 @@ class SPGSchemaMarkLang:
         assert (
             predicate_class_ns in self.types or predicate_class_ns in self.defined_types
         ), self.error_msg(
-            f"{predicate_class} is illegal, please ensure that it appears in this schema."
+            f"{predicate_class} is illegal, please ensure that it appears in this schema.",
+            predicate_class
         )
         object_type = self.types[predicate_class_ns]
 
         if short_name == "SYNANT":
             assert subject_type.spg_type_enum == SpgTypeEnum.Concept, self.error_msg(
-                "Only concept types could define synonym/antonym relation"
+                "Only concept types could define synonym/antonym relation",
+                "SYNANT"
             )
             assert object_type.spg_type_enum == SpgTypeEnum.Concept, self.error_msg(
-                "Synonymy/antonym relation can only point to concept types"
+                "Synonymy/antonym relation can only point to concept types",
+                "SYNANT"
             )
         elif short_name == "CAU":
             assert subject_type.spg_type_enum in [
                 SpgTypeEnum.Concept,
                 SpgTypeEnum.Event,
-            ], self.error_msg("Only concept/event types could define causal relation")
+            ], self.error_msg("Only concept/event types could define causal relation", "CAU")
             assert object_type.spg_type_enum in [
                 SpgTypeEnum.Concept,
                 SpgTypeEnum.Event,
             ], self.error_msg(
-                f'"{predicate_class}" must be a concept type to conform to the definition of causal relation'
+                f'"{predicate_class}" must be a concept type to conform to the definition of causal relation',
+                predicate_class
             )
             if subject_type.spg_type_enum == SpgTypeEnum.Concept:
                 assert object_type.spg_type_enum == SpgTypeEnum.Concept, self.error_msg(
-                    "The causal relation of concept types can only point to concept types"
+                    "The causal relation of concept types can only point to concept types",
+                    "CAU"
                 )
         elif short_name == "SEQ":
             assert subject_type.spg_type_enum in [
                 SpgTypeEnum.Event,
                 SpgTypeEnum.Concept,
             ], self.error_msg(
-                "Only concept/event types could define sequential relation"
+                "Only concept/event types could define sequential relation",
+                "SEQ"
             )
             assert (
                 subject_type.spg_type_enum == object_type.spg_type_enum
             ), self.error_msg(
-                f'"{predicate_class}" should keep the same type with "{subject_type.name.split(".")[1]}"'
+                f'"{predicate_class}" should keep the same type with "{subject_type.name.split(".")[1]}"',
+                predicate_class
             )
         elif short_name == "IND":
             assert subject_type.spg_type_enum in [
                 SpgTypeEnum.Entity,
                 SpgTypeEnum.Event,
-            ], self.error_msg("Only entity/event types could define inductive relation")
+            ], self.error_msg("Only entity/event types could define inductive relation", "IND")
             assert object_type.spg_type_enum == SpgTypeEnum.Concept, self.error_msg(
-                f'"{predicate_class}" must be a concept type to conform to the definition of inductive relation'
+                f'"{predicate_class}" must be a concept type to conform to the definition of inductive relation',
+                predicate_class
             )
         elif short_name == "INC":
             assert subject_type.spg_type_enum == SpgTypeEnum.Concept, self.error_msg(
-                "Only concept types could define inclusive relation"
+                "Only concept types could define inclusive relation",
+                "INC"
             )
             assert object_type.spg_type_enum == SpgTypeEnum.Concept, self.error_msg(
-                "The inclusion relation of concept types can only point to concept types"
+                "The inclusion relation of concept types can only point to concept types",
+                "INC"
             )
         elif short_name == "USE":
             assert subject_type.spg_type_enum == SpgTypeEnum.Concept, self.error_msg(
-                "Only concept types could define usage relation"
+                "Only concept types could define usage relation",
+                "USE"
             )
             assert object_type.spg_type_enum == SpgTypeEnum.Concept, self.error_msg(
-                "The usage relation of concept types can only point to concept types"
+                "The usage relation of concept types can only point to concept types",
+                "USE"
             )
 
     def parse_predicate(self, expression):
@@ -580,7 +677,8 @@ class SPGSchemaMarkLang:
             r"^([a-zA-Z0-9#]+)\(([\w\.]+)\):\s*?([a-zA-Z0-9,\.]+)$", expression
         )
         assert match, self.error_msg(
-            "Unrecognized expression, expect pattern like english(Chinese):Type"
+            "Unrecognized expression, expect pattern like EntityOrConceptName(UniqueID<en|ch>):Type",
+            expression
         )
 
         predicate_name = match.group(1)
@@ -594,7 +692,8 @@ class SPGSchemaMarkLang:
             and self.parsing_register[RegisterUnit.Relation] is None
         ):
             assert "#" in predicate_name, self.error_msg(
-                "Concept type only accept following categories of relation: INC#/CAU#/SYNANT#/IND#/USE#/SEQ#"
+                "Concept type only accept following categories of relation: INC#/CAU#/SYNANT#/IND#/USE#/SEQ#",
+                predicate_name
             )
 
         if "#" in predicate_name:
@@ -603,7 +702,8 @@ class SPGSchemaMarkLang:
         else:
             for semantic_short in self.semantic_rel.values():
                 assert predicate_name not in semantic_short, self.error_msg(
-                    f"{predicate_name} is a semantic predicate, please add the semantic prefix"
+                    f"{predicate_name} is a semantic predicate, please add the semantic prefix",
+                    predicate_name
                 )
 
         if (
@@ -619,7 +719,8 @@ class SPGSchemaMarkLang:
             except Exception as e:
                 raise ValueError(
                     self.error_msg(
-                        f"{predicate_class} is illegal, please ensure the name space or type name is correct."
+                        f"{predicate_class} is illegal, please ensure the name space or type name is correct.",
+                        predicate_class
                     )
                 )
 
@@ -628,7 +729,8 @@ class SPGSchemaMarkLang:
             or predicate_class in self.internal_type
             or predicate_class in self.defined_types
         ), self.error_msg(
-            f"{predicate_class} is illegal, please ensure that it appears in this schema."
+            f"{predicate_class} is illegal, please ensure that it appears in this schema.",
+            predicate_class
         )
 
         # assert predicate_name not in self.entity_internal_property, self.error_msg(
@@ -652,13 +754,15 @@ class SPGSchemaMarkLang:
 
             if cur_type.spg_type_enum == SpgTypeEnum.Concept:
                 assert spg_type_enum == SpgTypeEnum.Concept, self.error_msg(
-                    "Concept type only allow relationships that point to themselves"
+                    "Concept type only allow relationships that point to themselves",
+                    predicate_class
                 )
             elif cur_type.spg_type_enum == SpgTypeEnum.Entity:
                 assert spg_type_enum != SpgTypeEnum.Event, self.error_msg(
                     "Relationships of entity types are not allowed to point to event types; "
                     "instead, they are only permitted to point from event types to entity types, "
-                    "adhering to the principle of moving from dynamic to static."
+                    "adhering to the principle of moving from dynamic to static.",
+                    predicate_class
                 )
 
         if self.parsing_register[RegisterUnit.Relation] is not None:
@@ -667,26 +771,30 @@ class SPGSchemaMarkLang:
                 not in self.parsing_register[RegisterUnit.Relation].sub_properties
             ), self.error_msg(
                 f'Property "{predicate_name}" is duplicated under the relation '
-                f"{self.parsing_register[RegisterUnit.Relation].name}"
+                f"{self.parsing_register[RegisterUnit.Relation].name}",
+                predicate_name
             )
         else:
             assert (
                 predicate_name
                 not in self.parsing_register[RegisterUnit.Type].properties
             ), self.error_msg(
-                f'Property "{predicate_name}" is duplicated under the type {type_name[type_name.index(".") + 1:]}'
+                f'Property "{predicate_name}" is duplicated under the type {type_name[type_name.index(".") + 1:]}',
+                predicate_name
             )
         if predicate_class == "ConceptType":
             assert not self.is_internal_property(
                 predicate_name, SpgTypeEnum.Concept
             ), self.error_msg(
-                f"property {predicate_name} is the default property of ConceptType"
+                f"property {predicate_name} is the default property of ConceptType",
+                predicate_name
             )
         if predicate_class == "EventType":
             assert not self.is_internal_property(
                 predicate_name, SpgTypeEnum.Event
             ), self.error_msg(
-                f"property {predicate_name} is the default property of EventType"
+                f"property {predicate_name} is the default property of EventType",
+                predicate_name
             )
 
         if (
@@ -724,7 +832,8 @@ class SPGSchemaMarkLang:
                 and predicate_name == "subject"
             ):
                 assert predicate_class not in self.internal_type, self.error_msg(
-                    f"The subject of event type only allows entity/concept type"
+                    f"The subject of event type only allows entity/concept type",
+                    predicate_class
                 )
 
                 predicate.property_group = PropertyGroupEnum.Subject
@@ -737,7 +846,8 @@ class SPGSchemaMarkLang:
                         assert (
                             subject_type not in BasicTypeEnum.__members__
                         ), self.error_msg(
-                            f"{predicate_class} is illegal for subject in event type"
+                            f"{predicate_class} is illegal for subject in event type",
+                            subject_type
                         )
 
                         if "." not in subject_type:
@@ -746,7 +856,8 @@ class SPGSchemaMarkLang:
                             subject_type in self.types
                             or predicate_class in self.defined_types
                         ), self.error_msg(
-                            f"{predicate_class} is illegal, please ensure that it appears in this schema."
+                            f"{predicate_class} is illegal, please ensure that it appears in this schema.",
+                            subject_type
                         )
 
                         subject_predicate = Property(
@@ -765,13 +876,15 @@ class SPGSchemaMarkLang:
         else:
             # predicate is relation
             assert not predicate_class.startswith("STD."), self.error_msg(
-                f"{predicate_class} is not allow appear in the definition of relation."
+                f"{predicate_class} is not allow appear in the definition of relation.",
+                predicate_class
             )
             assert (
                 predicate_class in self.types
                 or predicate_class.split(".")[1] in self.defined_types
             ), self.error_msg(
-                f"{predicate_class} is illegal, please ensure that it appears in this schema."
+                f"{predicate_class} is illegal, please ensure that it appears in this schema.",
+                predicate_class
             )
             assert (
                 f"{predicate_name}_{predicate_class}"
@@ -781,7 +894,8 @@ class SPGSchemaMarkLang:
                 if self.parsing_register[RegisterUnit.Type].spg_type_enum
                 != SpgTypeEnum.Concept
                 else f'Relation "{match.group()}" is already defined by keyword autoRelate'
-                f'under the {type_name[type_name.index(".") + 1:]}'
+                f'under the {type_name[type_name.index(".") + 1:]}',
+                predicate_name
             )
 
             predicate = Relation(name=predicate_name, object_type_name=predicate_class)
@@ -801,7 +915,8 @@ class SPGSchemaMarkLang:
             r"^(desc|properties|constraint|rule|index):\s*?(.*)$", expression
         )
         assert match, self.error_msg(
-            "Unrecognized expression, expect desc:|properties:|constraint:|rule:|index:"
+            "Unrecognized property metadata expression, expect desc:|properties:|constraint:|rule:|index:",
+            expression.split(':')[0] if ':' in expression else expression
         )
 
         property_meta = match.group(1)
@@ -849,7 +964,8 @@ class SPGSchemaMarkLang:
 
         match = re.match(r"^(desc|properties|rule):\s*?(.*)$", expression)
         assert match, self.error_msg(
-            "Unrecognized expression, expect desc:|properties:|rule:"
+            "Unrecognized expression, expect desc:|properties:|rule:",
+            expression.split(':')[0] if ':' in expression else expression
         )
 
         property_meta = match.group(1)
@@ -1023,62 +1139,71 @@ class SPGSchemaMarkLang:
         """
         Load and then parse the script file
         """
+        try:
+            file = open(self.schema_file, "r", encoding="utf-8")
+            lines = file.read().splitlines()
+            self.preload_types(lines)
+            for line in lines:
+                self.current_line_num += 1
+                self.current_line = line  # Store the current line for error reporting
+                
+                strip_line = line.strip()
+                # replace tabs with two spaces
+                line = line.replace("\t", "  ")
+                if strip_line == "" or strip_line.startswith("#"):
+                    # skip empty or comments line
+                    continue
 
-        file = open(self.schema_file, "r", encoding="utf-8")
-        lines = file.read().splitlines()
-        self.preload_types(lines)
-        for line in lines:
-            self.current_line_num += 1
-            strip_line = line.strip()
-            # replace tabs with two spaces
-            line = line.replace("\t", "  ")
-            if strip_line == "" or strip_line.startswith("#"):
-                # skip empty or comments line
-                continue
+                if self.rule_quote_open:
+                    # process the multi-line assignment [[ .... ]]
+                    right_strip_line = line.rstrip()
+                    if strip_line.endswith("]]"):
+                        self.rule_quote_open = False
+                        if len(right_strip_line) > 2:
+                            self.rule_quote_predicate.logical_rule += right_strip_line[
+                                : len(right_strip_line) - 2
+                            ]
+                        self.rule_quote_predicate.logical_rule = self.complete_rule(
+                            self.rule_quote_predicate.logical_rule
+                        )
 
-            if self.rule_quote_open:
-                # process the multi-line assignment [[ .... ]]
-                right_strip_line = line.rstrip()
-                if strip_line.endswith("]]"):
-                    self.rule_quote_open = False
-                    if len(right_strip_line) > 2:
-                        self.rule_quote_predicate.logical_rule += right_strip_line[
-                            : len(right_strip_line) - 2
-                        ]
-                    self.rule_quote_predicate.logical_rule = self.complete_rule(
-                        self.rule_quote_predicate.logical_rule
+                    else:
+                        self.rule_quote_predicate.logical_rule += line + "\n"
+                    continue
+
+                indent_count = len(line) - len(line.lstrip())
+                if indent_count == 0:
+                    # the line without indent is namespace definition or a type definition
+                    self.adjust_parsing_level(0)
+
+                elif indent_count > self.last_indent_level:
+                    # the line is the sub definition of the previous line
+                    self.adjust_parsing_level(1)
+
+                elif indent_count < self.last_indent_level:
+                    # finish current indent parsing
+                    backward_step = None
+                    for i in range(0, len(self.indent_level_pos)):
+                        if indent_count == self.indent_level_pos[i]:
+                            backward_step = i - self.current_parsing_level
+                            break
+                    assert backward_step, self.error_msg(
+                        f"Invalid indentation, please align with the previous definition",
+                        "indentation"
                     )
 
-                else:
-                    self.rule_quote_predicate.logical_rule += line + "\n"
-                continue
+                    if backward_step != 0:
+                        self.adjust_parsing_level(backward_step)
 
-            indent_count = len(line) - len(line.lstrip())
-            if indent_count == 0:
-                # the line without indent is namespace definition or a type definition
-                self.adjust_parsing_level(0)
-
-            elif indent_count > self.last_indent_level:
-                # the line is the sub definition of the previous line
-                self.adjust_parsing_level(1)
-
-            elif indent_count < self.last_indent_level:
-                # finish current indent parsing
-                backward_step = None
-                for i in range(0, len(self.indent_level_pos)):
-                    if indent_count == self.indent_level_pos[i]:
-                        backward_step = i - self.current_parsing_level
-                        break
-                assert backward_step, self.error_msg(
-                    f"Invalid indentation, please align with the previous definition"
-                )
-
-                if backward_step != 0:
-                    self.adjust_parsing_level(backward_step)
-
-            self.parsing_dispatch(strip_line, self.current_parsing_level)
-            self.last_indent_level = indent_count
-            self.indent_level_pos[self.current_parsing_level] = indent_count
+                self.parsing_dispatch(strip_line, self.current_parsing_level)
+                self.last_indent_level = indent_count
+                self.indent_level_pos[self.current_parsing_level] = indent_count
+        except FileNotFoundError:
+            print(f"\n❌ SCHEMA ERROR: Schema file not found: {self.schema_file}")
+            raise
+        except Exception as e:
+            # Re-raise after printing for command line handling
+            raise
 
     def is_internal_property(self, prop: Property, spg_type: SpgTypeEnum):
         if spg_type == SpgTypeEnum.Entity or spg_type == SpgTypeEnum.Standard:
@@ -1102,7 +1227,8 @@ class SPGSchemaMarkLang:
         for prop in old:
             if not old_property.inherited and prop not in new:
                 assert inherited_type is None, self.error_msg(
-                    f'"{old_type_name} was inherited by other type, such as "{inherited_type}". Prohibit property alteration!'
+                    f'"{old_type_name} was inherited by other type, such as "{inherited_type}". Prohibit property alteration!',
+                    old_type_name
                 )
 
                 old[prop].alter_operation = AlterOperationEnum.Delete
@@ -1114,7 +1240,8 @@ class SPGSchemaMarkLang:
         for prop, o in new.items():
             if prop not in old and not new_property.inherited:
                 assert inherited_type is None, self.error_msg(
-                    f'"{old_type_name} was inherited by other type, such as "{inherited_type}". Prohibit property alteration!'
+                    f'"{old_type_name} was inherited by other type, such as "{inherited_type}". Prohibit property alteration!',
+                    old_type_name
                 )
 
                 old_property.add_sub_property(new[prop])
@@ -1125,10 +1252,12 @@ class SPGSchemaMarkLang:
 
             elif old[prop].object_type_name != new[prop].object_type_name:
                 assert inherited_type is None, self.error_msg(
-                    f'"{old_type_name} was inherited by other type, such as "{inherited_type}". Prohibit property alteration!'
+                    f'"{old_type_name} was inherited by other type, such as "{inherited_type}". Prohibit property alteration!',
+                    old_type_name
                 )
                 assert not old_property.inherited, self.error_msg(
-                    f"{old_type_name}] {old_property.name}.{prop} is inherited sub property, deny modify"
+                    f"{old_type_name}] {old_property.name}.{prop} is inherited sub property, deny modify",
+                    old_property.name
                 )
 
                 old[prop].alter_operation = AlterOperationEnum.Delete
@@ -1140,10 +1269,12 @@ class SPGSchemaMarkLang:
 
             elif old[prop] != new[prop]:
                 assert inherited_type is None, self.error_msg(
-                    f'"{old_type_name} was inherited by other type, such as "{inherited_type}". Prohibit property alteration!'
+                    f'"{old_type_name} was inherited by other type, such as "{inherited_type}". Prohibit property alteration!',
+                    old_type_name
                 )
                 assert not old_property.inherited, self.error_msg(
-                    f"{old_type_name}] {old_property.name}.{prop} is inherited property, deny modify"
+                    f"{old_type_name}] {old_property.name}.{prop} is inherited property, deny modify",
+                    old_property.name
                 )
 
                 old[prop].overwritten_by(o)
@@ -1202,7 +1333,8 @@ class SPGSchemaMarkLang:
                     and new_type.parent_type_name == old_type.parent_type_name
                 ), self.error_msg(
                     f"Cannot alter the type definition or its parent type of {new_type.name}. "
-                    "if you still want to make change, please delete it first then re-create it."
+                    "if you still want to make change, please delete it first then re-create it.",
+                    new_type.name
                 )
 
                 need_update = False
@@ -1219,14 +1351,16 @@ class SPGSchemaMarkLang:
                         new_type.hypernym_predicate == old_type.hypernym_predicate
                     ), self.error_msg(
                         f"Cannot alter the hypernym predicate of {new_type.name}. "
-                        "if you still want to make change, please delete it first then re-create it."
+                        "if you still want to make change, please delete it first then re-create it.",
+                        new_type.name
                     )
 
                 if new_type.spg_type_enum == SpgTypeEnum.Standard:
                     assert old_type.spreadable == new_type.spreadable, self.error_msg(
                         f"Cannot alter the spreadable value of {new_type.name}. "
                         f"if you still want to make change, "
-                        "please delete the definition first and then re-create it."
+                        "please delete the definition first and then re-create it.",
+                        new_type.name
                     )
 
                     if old_type.constraint != new_type.constraint:
@@ -1246,10 +1380,12 @@ class SPGSchemaMarkLang:
                             and old_type.properties[prop].property_group
                             != PropertyGroupEnum.Subject
                         ), self.error_msg(
-                            "The subject property of event type cannot be deleted"
+                            "The subject property of event type cannot be deleted",
+                            prop
                         )
                         assert inherited_type is None, self.error_msg(
-                            f'"{new_type.name} was inherited by other type, such as "{inherited_type}". Prohibit property alteration!'
+                            f'"{new_type.name} was inherited by other type, such as "{inherited_type}". Prohibit property alteration!',
+                            new_type.name
                         )
 
                         old_type.properties[
@@ -1266,7 +1402,8 @@ class SPGSchemaMarkLang:
                         and not o.inherited
                     ):
                         assert inherited_type is None, self.error_msg(
-                            f'"{new_type.name} was inherited by other type, such as "{inherited_type}". Prohibit property alteration!'
+                            f'"{new_type.name} was inherited by other type, such as "{inherited_type}". Prohibit property alteration!',
+                            new_type.name
                         )
 
                         old_type.add_property(new_type.properties[prop])
@@ -1278,10 +1415,12 @@ class SPGSchemaMarkLang:
                         != new_type.properties[prop].object_type_name
                     ):
                         assert inherited_type is None, self.error_msg(
-                            f'"{new_type.name} was inherited by other type, such as "{inherited_type}". Prohibit property alteration!'
+                            f'"{new_type.name} was inherited by other type, such as "{inherited_type}". Prohibit property alteration!',
+                            new_type.name
                         )
                         assert not old_type.properties[prop].inherited, self.error_msg(
-                            f"{new_type.name}] {prop} is inherited property, deny modify"
+                            f"{new_type.name}] {prop} is inherited property, deny modify",
+                            prop
                         )
 
                         old_type.properties[
@@ -1309,10 +1448,12 @@ class SPGSchemaMarkLang:
 
                     elif old_type.properties[prop] != new_type.properties[prop]:
                         assert inherited_type is None, self.error_msg(
-                            f'"{new_type.name} was inherited by other type, such as "{inherited_type}". Prohibit property alteration!'
+                            f'"{new_type.name} was inherited by other type, such as "{inherited_type}". Prohibit property alteration!',
+                            new_type.name
                         )
                         assert not old_type.properties[prop].inherited, self.error_msg(
-                            f"{new_type.name}] {prop} is inherited property, deny modify"
+                            f"{new_type.name}] {prop} is inherited property, deny modify",
+                            prop
                         )
 
                         old_type.properties[prop].overwritten_by(o)
@@ -1330,7 +1471,8 @@ class SPGSchemaMarkLang:
                         != new_type.relations[relation].object_type_name
                     ):
                         assert inherited_type is None, self.error_msg(
-                            f'"{new_type.name} was inherited by other type, such as "{inherited_type}". Prohibit relation alteration!'
+                            f'"{new_type.name} was inherited by other type, such as "{inherited_type}". Prohibit relation alteration!',
+                            new_type.name
                         )
                         old_type.add_relation(new_type.relations[relation])
                         need_update = True
@@ -1349,7 +1491,8 @@ class SPGSchemaMarkLang:
                         )
                         if need_update:
                             assert inherited_type is None, self.error_msg(
-                                f'"{new_type.name} was inherited by other type, such as "{inherited_type}". Prohibit relation alteration!'
+                                f'"{new_type.name} was inherited by other type, such as "{inherited_type}". Prohibit relation alteration!',
+                                new_type.name
                             )
                             old_type.relations[
                                 relation
@@ -1357,12 +1500,14 @@ class SPGSchemaMarkLang:
 
                     elif old_type.relations[relation] != new_type.relations[relation]:
                         assert inherited_type is None, self.error_msg(
-                            f'"{new_type.name} was inherited by other type, such as "{inherited_type}". Prohibit relation alteration!'
+                            f'"{new_type.name} was inherited by other type, such as "{inherited_type}". Prohibit relation alteration!',
+                            new_type.name
                         )
                         assert not old_type.relations[
                             relation
                         ].inherited, self.error_msg(
-                            f"{new_type.name}] {p_name} is inherited relation, deny modify"
+                            f"{new_type.name}] {p_name} is inherited relation, deny modify",
+                            p_name
                         )
 
                         old_type.relations[relation].overwritten_by(
@@ -1390,7 +1535,8 @@ class SPGSchemaMarkLang:
                         )
                     ):
                         assert inherited_type is None, self.error_msg(
-                            f'"{new_type.name} was inherited by other type, such as "{inherited_type}". Prohibit relation alteration!'
+                            f'"{new_type.name} was inherited by other type, such as "{inherited_type}". Prohibit relation alteration!',
+                            new_type.name
                         )
                         old_type.relations[
                             relation
