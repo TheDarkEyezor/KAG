@@ -15,6 +15,7 @@ from pathlib import Path
 import yaml
 import click
 import knext.project
+import traceback
 
 from knext.schema.marklang.concept_rule_ml import SPGConceptRuleMarkLang
 from knext.schema.marklang.schema_ml import SPGSchemaMarkLang
@@ -34,15 +35,23 @@ def commit_schema():
         click.secho(f"ERROR: File {schema_file} not exists.", fg="bright_red")
         return
 
-    ml = SPGSchemaMarkLang(schema_file)
-    is_altered = ml.sync_schema()
+    try:
+        ml = SPGSchemaMarkLang(schema_file)
+        is_altered = ml.sync_schema()
 
-    if is_altered:
-        click.secho("Schema is successfully committed.", fg="bright_green")
-    else:
-        click.secho(
-            "There is no diff between local and server-side schema.", fg="bright_yellow"
-        )
+        if is_altered:
+            click.secho("Schema is successfully committed.", fg="bright_green")
+        else:
+            click.secho(
+                "There is no diff between local and server-side schema.", fg="bright_yellow"
+            )
+    except AssertionError as e:
+        # The error has already been printed by error_msg method
+        click.secho("Schema validation failed. Please fix the errors above and try again.", fg="bright_red")
+        return 1
+    except Exception as e:
+        click.secho(f"An unexpected error occurred: {str(e)}", fg="bright_red")
+        return 1
 
 
 @click.option("--file", help="Path of DSL file.")
@@ -50,5 +59,13 @@ def reg_concept_rule(file):
     """
     Register a concept rule according to DSL file.
     """
-    SPGConceptRuleMarkLang(file)
-    click.secho(f"Concept rule is successfully registered", fg="bright_green")
+    try:
+        SPGConceptRuleMarkLang(file)
+        click.secho(f"Concept rule is successfully registered", fg="bright_green")
+    except AssertionError as e:
+        # Error already printed
+        click.secho("Concept rule registration failed. Please fix the errors and try again.", fg="bright_red")
+        return 1
+    except Exception as e:
+        click.secho(f"An unexpected error occurred: {str(e)}", fg="bright_red")
+        return 1
